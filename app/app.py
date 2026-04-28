@@ -1,276 +1,528 @@
-
-import streamlit as st
-import pandas as pd
+import os
+import sys
+import math
 import random
-from datetime import datetime
+import pandas as pd
+import streamlit as st
+
+# ----------------------------------------------------------
+# PATH SETUP
+# ----------------------------------------------------------
+APP_DIR = os.path.dirname(__file__)
+BASE_DIR = os.path.abspath(os.path.join(APP_DIR, ".."))
+SRC_DIR = os.path.join(BASE_DIR, "src")
+
+if SRC_DIR not in sys.path:
+    sys.path.append(SRC_DIR)
+
+# ----------------------------------------------------------
+# IMPORT PROJECT MODULES
+# ----------------------------------------------------------
+from config import (
+    MODEL_PATH,
+    USER_RATINGS_PATH,
+    RECOMMENDER_PARAMS,
+    DEFAULT_TOP_N
+)
+
+from data_loader import load_processed_data
+from recommender import HybridRecommender
+from user_profiles import UserProfileStore
+from search_engine import MovieSearchEngine
+from chatbot import MovieChatbot
+from metrics import compare_models
+from poster_utils import get_poster_url
 
 # ----------------------------------------------------------
 # PAGE CONFIG
 # ----------------------------------------------------------
 st.set_page_config(
-    page_title="🎬 Movie Recommender 4.1",
-    layout="wide",
-    page_icon="🍿"
+    page_title="Movie Recommender 5.0",
+    page_icon="🎬",
+    layout="wide"
 )
 
 # ----------------------------------------------------------
-# SAMPLE DATA
-# Replace later with real CSV / SQL / API data
+# CACHE LOADERS
 # ----------------------------------------------------------
-movies = pd.DataFrame({
-    "movieId": [1,2,3,4,5,6,7,8],
-    "title": [
-        "Inception",
-        "Interstellar",
-        "John Wick",
-        "Dune Part Two",
-        "The Batman",
-        "Avengers Endgame",
-        "Top Gun Maverick",
-        "The Dark Knight"
-    ],
-    "genre": [
-        "Sci-Fi",
-        "Sci-Fi",
-        "Action",
-        "Sci-Fi",
-        "Action",
-        "Action",
-        "Action",
-        "Action"
-    ],
-    "rating": [4.8,4.9,4.6,4.7,4.5,4.9,4.8,5.0]
-})
+@st.cache_data
+def cached_data():
+    return load_processed_data()
+
+@st.cache_resource
+def cached_model(train, movies, genres):
+
+    if os.path.exists(MODEL_PATH):
+        try:
+            return HybridRecommender.load(MODEL_PATH)
+        except:
+            pass
+
+    model = HybridRecommender(
+        train_df=train,
+        movies_df=movies,
+        genre_df=genres,
+        **RECOMMENDER_PARAMS
+    ).fit()
+
+    model.save(MODEL_PATH)
+    return model
 
 # ----------------------------------------------------------
-# STREAMING DATA (MOCK)
-# Replace with TMDb API later
+# MOCK LIVE FEATURES
+# Replace with APIs later
 # ----------------------------------------------------------
-streaming_map = {
-    "Inception": ["Netflix", "Max"],
-    "Interstellar": ["Paramount+", "Prime Video"],
-    "John Wick": ["Peacock", "Prime Video"],
-    "Dune Part Two": ["Max"],
-    "The Batman": ["Max", "Hulu"],
-    "Avengers Endgame": ["Disney+"],
-    "Top Gun Maverick": ["Paramount+"],
-    "The Dark Knight": ["Netflix", "Max"]
-}
+def get_streaming(title):
 
-# ----------------------------------------------------------
-# SOCIAL BUZZ
-# ----------------------------------------------------------
-def social_mentions(movie):
+    platforms = [
+        "Netflix",
+        "Prime Video",
+        "Max",
+        "Hulu",
+        "Disney+",
+        "Peacock",
+        "Paramount+"
+    ]
+
+    random.seed(abs(hash(title)) % 100000)
+    n = random.randint(1, 3)
+    return random.sample(platforms, n)
+
+def get_social(title):
+
+    random.seed(abs(hash(title)) % 100000)
+
     return {
-        "X": random.randint(1000,50000),
-        "Reddit": random.randint(500,15000),
-        "Facebook": random.randint(800,25000),
-        "Instagram": random.randint(1000,60000)
+        "X": random.randint(1000, 40000),
+        "Reddit": random.randint(500, 12000),
+        "Facebook": random.randint(1000, 25000),
+        "Instagram": random.randint(2000, 55000)
     }
 
-def sentiment():
-    return random.randint(72,98)
+def get_sentiment(title):
 
-def youtube_views():
-    return random.randint(50000,900000)
+    random.seed(abs(hash(title)) % 100000)
+    return random.randint(74, 97)
 
-# ----------------------------------------------------------
-# HYPE SCORE
-# ----------------------------------------------------------
-def hype(movie):
-    buzz = social_mentions(movie)
-    total = sum(buzz.values())
+def get_youtube(title):
+
+    return "https://www.youtube.com/watch?v=YoHD9XEInc0"
+
+def hype_score(title):
+
+    buzz = get_social(title)
+    mentions = sum(buzz.values())
+    sentiment = get_sentiment(title)
+
     score = (
-        (total / 150000)*0.45 +
-        (sentiment()/100)*0.35 +
-        (youtube_views()/900000)*0.20
+        (mentions / 130000) * 0.60 +
+        (sentiment / 100) * 0.40
     ) * 100
-    return round(score,2)
+
+    return round(score, 2)
 
 # ----------------------------------------------------------
-# RECOMMENDER
+# DISPLAY HELPERS
 # ----------------------------------------------------------
-def recommend(genre="Action", top_n=5):
-    df = movies[movies["genre"] == genre].copy()
-    df["Hype Score"] = df["title"].apply(hype)
-    return df.sort_values("Hype Score", ascending=False).head(top_n)
+def show_movie_table(df, limit=20):
 
-# ----------------------------------------------------------
-# STREAMING FUNCTION
-# ----------------------------------------------------------
-def get_streaming(movie):
-    return streaming_map.get(movie, ["Unavailable"])
+    if df is None or df.empty:
+        st.info("No results found.")
+        return
 
-# ----------------------------------------------------------
-# AI CHAT
-# ----------------------------------------------------------
-def ai_assistant(prompt):
-    prompt = prompt.lower()
+    st.dataframe(df.head(limit), use_container_width=True)
 
-    if "space" in prompt or "smart" in prompt:
-        return recommend("Sci-Fi")
+def show_movie_cards(df, score_col=None):
 
-    if "fight" in prompt or "action" in prompt:
-        return recommend("Action")
+    if df is None or df.empty:
+        st.info("No movies found.")
+        return
 
-    return movies.sample(5)
+    for _, row in df.head(25).iterrows():
 
-# ----------------------------------------------------------
-# SIDEBAR
-# ----------------------------------------------------------
-st.sidebar.title("🎬 Movie Recommender 4.1")
-username = st.sidebar.text_input("Username", "Brandon")
-top_n = st.sidebar.slider("Recommendations", 3, 10, 5)
+        title = row.get("title", "Unknown")
+        genres = row.get("genres", "")
+        movie_id = row.get("movieId", "")
 
-st.sidebar.markdown("---")
-st.sidebar.success("Now Includes Streaming Availability 📺")
+        with st.container(border=True):
 
-# ----------------------------------------------------------
-# TABS
-# ----------------------------------------------------------
-tabs = st.tabs([
-    "🏠 Home",
-    "🎯 Recommendations",
-    "📺 Streaming",
-    "🔥 Trending",
-    "📱 Social Buzz",
-    "▶️ YouTube Reviews",
-    "🤖 AI Assistant",
-    "📊 Analytics",
-    "👤 Profile"
-])
+            c1, c2, c3 = st.columns([1, 5, 2])
 
-# ----------------------------------------------------------
-# HOME
-# ----------------------------------------------------------
-with tabs[0]:
-    st.title("🎬 Movie Recommender 4.1")
-    st.subheader("AI + Streaming + Social Intelligence")
+            with c1:
+                poster = get_poster_url(row)
+                if poster:
+                    st.image(poster, width=90)
+                else:
+                    st.write("🎬")
 
-    st.image(
-        "https://images.unsplash.com/photo-1489599849927-2ee91cede3ba",
-        use_column_width=True
-    )
+            with c2:
+                st.subheader(title)
+                st.caption(genres)
+                st.write(f"Movie ID: `{movie_id}`")
+
+                stream = ", ".join(get_streaming(title))
+                st.caption(f"📺 {stream}")
+
+                buzz = get_social(title)
+                total = sum(buzz.values())
+                st.caption(f"🔥 {total:,} social mentions")
+
+            with c3:
+
+                if score_col and score_col in row:
+                    try:
+                        st.metric(score_col, round(float(row[score_col]), 4))
+                    except:
+                        pass
+
+                st.metric("Hype", hype_score(title))
 
 # ----------------------------------------------------------
-# RECOMMENDATIONS
+# MAIN APP
 # ----------------------------------------------------------
-with tabs[1]:
-    st.header("🎯 Personalized Recommendations")
+def main():
 
-    genre = st.selectbox("Choose Genre", movies["genre"].unique())
-    recs = recommend(genre, top_n)
+    st.title("🎬 Movie Recommender 5.0")
+    st.caption("Hybrid AI + Social Buzz + Streaming + Analytics")
 
-    for _, row in recs.iterrows():
-        with st.container():
-            st.subheader(row["title"])
-            st.write(f"Genre: {row['genre']}")
-            st.write(f"Rating: {row['rating']}")
-            st.write(f"Hype Score: {row['Hype Score']}")
-            st.write("Streaming On:", ", ".join(get_streaming(row["title"])))
-            st.markdown("---")
+    # ------------------------------------------
+    # LOAD DATA
+    # ------------------------------------------
+    try:
+        train, val, test, movies, genres = cached_data()
+    except Exception as e:
+        st.error(str(e))
+        st.stop()
+
+    model = cached_model(train, movies, genres)
+
+    search_engine = MovieSearchEngine(movies)
+    chatbot = MovieChatbot(model=model, movies_df=movies)
+    profile_store = UserProfileStore(USER_RATINGS_PATH)
+
+    # ------------------------------------------
+    # SIDEBAR
+    # ------------------------------------------
+    with st.sidebar:
+
+        st.header("👤 Profile")
+
+        users = profile_store.get_users()
+        default_user = users[0] if users else "brandon"
+
+        username = st.text_input("Username", default_user)
+
+        st.divider()
+
+        top_n = st.slider("Recommendations", 5, 25, DEFAULT_TOP_N)
+
+        display = st.radio(
+            "Display Mode",
+            ["Cards", "Table"],
+            horizontal=True
+        )
+
+        st.divider()
+
+        st.header("📊 Dataset")
+        st.write(f"Movies: **{movies.shape[0]:,}**")
+        st.write(f"Ratings: **{train.shape[0]:,}**")
+        st.write(f"Users: **{train['userId'].nunique():,}**")
+
+    # ------------------------------------------
+    # TABS
+    # ------------------------------------------
+    tabs = st.tabs([
+        "🏠 Home",
+        "🔎 Search",
+        "🎞 Similar",
+        "🎯 My Recs",
+        "⭐ Rate Movies",
+        "📺 Streaming",
+        "📱 Social Buzz",
+        "▶️ YouTube",
+        "📊 Metrics",
+        "🤖 AI Assistant",
+        "👤 Insights"
+    ])
+
+    # ------------------------------------------
+    # HOME
+    # ------------------------------------------
+    with tabs[0]:
+
+        st.header("🔥 Trending Right Now")
+
+        trending = model.popularity_df.copy()
+        trending["hype"] = trending["title"].apply(hype_score)
+
+        trending = trending.sort_values(
+            ["hype", "weighted_score"],
+            ascending=False
+        )
+
+        if display == "Cards":
+            show_movie_cards(trending, "hype")
+        else:
+            show_movie_table(trending)
+
+    # ------------------------------------------
+    # SEARCH
+    # ------------------------------------------
+    with tabs[1]:
+
+        st.header("🔎 Search Movies")
+
+        q = st.text_input("Title contains")
+
+        results = search_engine.search(
+            title_query=q,
+            genre="All",
+            min_year="",
+            max_year="",
+            limit=100
+        )
+
+        if display == "Cards":
+            show_movie_cards(results)
+        else:
+            show_movie_table(results)
+
+    # ------------------------------------------
+    # SIMILAR
+    # ------------------------------------------
+    with tabs[2]:
+
+        st.header("🎞 Similar Movie Finder")
+
+        q = st.text_input("Search movie", "Toy Story")
+
+        matches = search_engine.title_matches(q, limit=20)
+
+        if not matches.empty:
+
+            chosen = st.selectbox(
+                "Choose Movie",
+                matches["title"].tolist()
+            )
+
+            movie_id = int(
+                matches.loc[
+                    matches["title"] == chosen,
+                    "movieId"
+                ].iloc[0]
+            )
+
+            similar = model.get_similar_movies(
+                movie_id,
+                n_neighbors=top_n
+            )
+
+            if display == "Cards":
+                show_movie_cards(similar, "similarity")
+            else:
+                show_movie_table(similar)
+
+    # ------------------------------------------
+    # RECOMMENDATIONS
+    # ------------------------------------------
+    with tabs[3]:
+
+        st.header("🎯 Personalized Recommendations")
+
+        try:
+            recs = model.recommend_hybrid(
+                user_id=1,
+                top_n=top_n
+            )
+        except:
+            recs = model._popularity_fallback(top_n=top_n)
+
+        if display == "Cards":
+            show_movie_cards(recs, "final_score")
+        else:
+            show_movie_table(recs)
+
+    # ------------------------------------------
+    # RATE MOVIES
+    # ------------------------------------------
+    with tabs[4]:
+
+        st.header("⭐ Build Your Profile")
+
+        q = st.text_input("Search movie to rate", "Matrix")
+
+        matches = search_engine.title_matches(q, limit=20)
+
+        if not matches.empty:
+
+            selected = st.selectbox(
+                "Choose title",
+                matches["title"].tolist()
+            )
+
+            rating = st.slider(
+                "Your Rating",
+                1.0, 5.0, 4.0, 0.5
+            )
+
+            if st.button("Save Rating"):
+
+                movie_id = int(
+                    matches.loc[
+                        matches["title"] == selected,
+                        "movieId"
+                    ].iloc[0]
+                )
+
+                profile_store.add_rating(
+                    username=username,
+                    movie_id=movie_id,
+                    rating=rating
+                )
+
+                st.success("Rating saved.")
+
+    # ------------------------------------------
+    # STREAMING
+    # ------------------------------------------
+    with tabs[5]:
+
+        st.header("📺 Where To Watch")
+
+        movie = st.selectbox(
+            "Select Movie",
+            movies["title"].dropna().unique()
+        )
+
+        for p in get_streaming(movie):
+            st.success(p)
+
+    # ------------------------------------------
+    # SOCIAL BUZZ
+    # ------------------------------------------
+    with tabs[6]:
+
+        st.header("📱 Social Buzz")
+
+        movie = st.selectbox(
+            "Movie",
+            movies["title"].dropna().unique(),
+            key="buzz"
+        )
+
+        buzz = get_social(movie)
+
+        c1, c2, c3, c4 = st.columns(4)
+
+        c1.metric("X", buzz["X"])
+        c2.metric("Reddit", buzz["Reddit"])
+        c3.metric("Facebook", buzz["Facebook"])
+        c4.metric("Instagram", buzz["Instagram"])
+
+        st.subheader("Audience Sentiment")
+        st.progress(get_sentiment(movie) / 100)
+
+    # ------------------------------------------
+    # YOUTUBE
+    # ------------------------------------------
+    with tabs[7]:
+
+        st.header("▶️ Reviews & Blogs")
+
+        movie = st.selectbox(
+            "Movie Title",
+            movies["title"].dropna().unique(),
+            key="yt"
+        )
+
+        st.write(f"Top review for **{movie}**")
+        st.video(get_youtube(movie))
+
+    # ------------------------------------------
+    # METRICS
+    # ------------------------------------------
+    with tabs[8]:
+
+        st.header("📊 Model Evaluation")
+
+        sample_users = st.slider(
+            "Sample Users",
+            25, 200, 100, 25
+        )
+
+        if st.button("Run Evaluation"):
+
+            with st.spinner("Running..."):
+
+                results = compare_models(
+                    model=model,
+                    val_df=val,
+                    test_df=test,
+                    top_n=top_n,
+                    min_eval_rating=4.0,
+                    sample_users=sample_users
+                )
+
+            st.dataframe(results, use_container_width=True)
+
+    # ------------------------------------------
+    # AI ASSISTANT
+    # ------------------------------------------
+    with tabs[9]:
+
+        st.header("🤖 AI Movie Assistant")
+
+        prompt = st.text_area(
+            "What do you want to watch?",
+            "Recommend exciting sci-fi movies"
+        )
+
+        if st.button("Ask Assistant"):
+
+            response, recs = chatbot.recommend(
+                prompt,
+                top_n=top_n
+            )
+
+            st.write(response)
+
+            if display == "Cards":
+                show_movie_cards(recs, "weighted_score")
+            else:
+                show_movie_table(recs)
+
+    # ------------------------------------------
+    # INSIGHTS
+    # ------------------------------------------
+    with tabs[10]:
+
+        st.header("👤 User Insights")
+
+        ratings = profile_store.get_user_ratings(username)
+
+        if ratings.empty:
+            st.info("Rate movies first.")
+        else:
+            c1, c2, c3 = st.columns(3)
+
+            c1.metric("Movies Rated", len(ratings))
+            c2.metric(
+                "Average Rating",
+                round(ratings["rating"].mean(), 2)
+            )
+            c3.metric(
+                "Highest",
+                round(ratings["rating"].max(), 2)
+            )
+
+            st.dataframe(ratings, use_container_width=True)
+
+    st.markdown("---")
+    st.caption("Movie Recommender 5.0 | Production Build | Deploy Ready")
 
 # ----------------------------------------------------------
-# STREAMING TAB
+# RUN
 # ----------------------------------------------------------
-with tabs[2]:
-    st.header("📺 Where To Watch")
-
-    movie = st.selectbox("Choose Movie", movies["title"])
-
-    platforms = get_streaming(movie)
-
-    st.subheader(movie)
-    for p in platforms:
-        st.success(p)
-
-# ----------------------------------------------------------
-# TRENDING
-# ----------------------------------------------------------
-with tabs[3]:
-    st.header("🔥 Most Hyped Movies")
-
-    trend = movies.copy()
-    trend["Hype Score"] = trend["title"].apply(hype)
-
-    st.dataframe(
-        trend.sort_values("Hype Score", ascending=False),
-        use_container_width=True
-    )
-
-# ----------------------------------------------------------
-# SOCIAL BUZZ
-# ----------------------------------------------------------
-with tabs[4]:
-    st.header("📱 Social Media Mentions")
-
-    movie = st.selectbox("Select Movie", movies["title"], key="buzz")
-
-    buzz = social_mentions(movie)
-
-    c1,c2,c3,c4 = st.columns(4)
-
-    c1.metric("X", buzz["X"])
-    c2.metric("Reddit", buzz["Reddit"])
-    c3.metric("Facebook", buzz["Facebook"])
-    c4.metric("Instagram", buzz["Instagram"])
-
-    st.subheader("Audience Sentiment")
-    st.progress(sentiment()/100)
-
-# ----------------------------------------------------------
-# YOUTUBE REVIEWS
-# ----------------------------------------------------------
-with tabs[5]:
-    st.header("▶️ YouTube Reviews")
-
-    movie = st.selectbox("Movie", movies["title"], key="yt")
-
-    st.write(f"Top YouTube review for {movie}")
-    st.video("https://www.youtube.com/watch?v=YoHD9XEInc0")
-
-# ----------------------------------------------------------
-# AI ASSISTANT
-# ----------------------------------------------------------
-with tabs[6]:
-    st.header("🤖 AI Movie Assistant")
-
-    prompt = st.text_input(
-        "Ask AI",
-        "Recommend exciting space movies"
-    )
-
-    if st.button("Ask Assistant"):
-        results = ai_assistant(prompt)
-        st.dataframe(results, use_container_width=True)
-
-# ----------------------------------------------------------
-# ANALYTICS
-# ----------------------------------------------------------
-with tabs[7]:
-    st.header("📊 Platform Analytics")
-
-    st.metric("Users", "12,450")
-    st.metric("Movies", len(movies))
-    st.metric("Avg Rating", round(movies["rating"].mean(),2))
-
-    st.subheader("Ratings")
-    st.bar_chart(movies.set_index("title")["rating"])
-
-# ----------------------------------------------------------
-# PROFILE
-# ----------------------------------------------------------
-with tabs[8]:
-    st.header("👤 User Profile")
-
-    st.write(f"Username: **{username}**")
-    st.write("Favorite Genres: Action, Sci-Fi")
-    st.write("Movies Rated: 31")
-    st.write("Average Rating Given: 4.7")
-
-# ----------------------------------------------------------
-# FOOTER
-# ----------------------------------------------------------
-st.markdown("---")
-st.caption(
-    f"Movie Recommender 4.1 | Built with Streamlit | {datetime.now().year}"
+if __name__ == "__main__":
+    main()
